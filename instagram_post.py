@@ -122,9 +122,27 @@ def merge_clips(paths, output_path):
         "ffmpeg", "-y", *inputs,
         "-filter_complex", filter_complex,
         "-map", "[outv]", "-an",
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "25",
+        "-maxrate", "3500k", "-bufsize", "7000k",
         output_path,
     ]
+    subprocess.run(cmd, check=True)
+
+
+def compress_for_upload(input_path, output_path, keep_audio):
+    cmd = [
+        "ffmpeg", "-y", "-i", input_path,
+        "-vf",
+        "scale=1080:1920:force_original_aspect_ratio=decrease,"
+        "pad=1080:1920:(ow-iw)/2:(oh-ih)/2,setsar=1",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "25",
+        "-maxrate", "3500k", "-bufsize", "7000k",
+    ]
+    if keep_audio:
+        cmd += ["-c:a", "aac", "-b:a", "128k"]
+    else:
+        cmd += ["-an"]
+    cmd.append(output_path)
     subprocess.run(cmd, check=True)
 
 
@@ -207,7 +225,8 @@ def main():
                 break
 
         if len(chosen_paths) == 1:
-            upload_path = chosen_paths[0]
+            upload_path = os.path.join(tmp, "solo.mp4")
+            compress_for_upload(chosen_paths[0], upload_path, keep_audio=True)
         else:
             upload_path = os.path.join(tmp, "merged.mp4")
             merge_clips(chosen_paths, upload_path)
