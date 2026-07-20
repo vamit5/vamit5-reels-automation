@@ -30,6 +30,23 @@ CAPTION = (
 )
 
 
+def run_with_retries(func, attempts=3, delay=8):
+    last_exc = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return func()
+        except requests.exceptions.HTTPError as exc:
+            status = exc.response.status_code if exc.response is not None else None
+            if status is not None and status < 500:
+                raise
+            last_exc = exc
+        except Exception as exc:
+            last_exc = exc
+        if attempt < attempts:
+            time.sleep(delay)
+    raise last_exc
+
+
 def get_drive_service():
     info = json.loads(GDRIVE_SERVICE_ACCOUNT_JSON)
     creds = service_account.Credentials.from_service_account_info(
@@ -42,12 +59,12 @@ def list_videos(drive):
     files = []
     page_token = None
     while True:
-        response = drive.files().list(
+        response = run_with_retries(lambda: drive.files().list(
             q=f"'{GDRIVE_FOLDER_ID}' in parents and trashed = false",
             fields="nextPageToken, files(id, name, mimeType, createdTime, videoMediaMetadata)",
             pageToken=page_token,
             pageSize=1000,
-        ).execute()
+        ).execute())
         for f in response.get("files", []):
             if f.get("mimeType", "").startswith(VIDEO_MIME_PREFIX):
                 files.append(f)
@@ -80,12 +97,15 @@ def next_start_index(files, last_file_id):
 
 
 def download_file(drive, file_id, dest_path):
-    request = drive.files().get_media(fileId=file_id)
-    with io.FileIO(dest_path, "wb") as fh:
-        downloader = MediaIoBaseDownload(fh, request)
-        done = False
-        while not done:
-            _, done = downloader.next_chunk()
+    def attempt():
+        request = drive.files().get_media(fileId=file_id)
+        with io.FileIO(dest_path, "wb") as fh:
+            downloader = MediaIoBaseDownload(fh, request)
+            done = False
+            while not done:
+                _, done = downloader.next_chunk()
+
+    run_with_retries(attempt)
 
 
 def ffprobe_duration(path):
@@ -148,37 +168,49 @@ def compress_for_upload(input_path, output_path, keep_audio):
 
 def upload_to_cloudinary(path):
     url = f"https://api.cloudinary.com/v1_1/{CLOUDINARY_CLOUD_NAME}/video/upload"
-    with open(path, "rb") as fh:
-        response = requests.post(
-            url,
-            files={"file": fh},
-            data={"upload_preset": CLOUDINARY_UPLOAD_PRESET},
-            timeout=600,
-        )
-    response.raise_for_status()
-    return response.json()["secure_url"]
+
+    def attempt():
+        with open(path, "rb") as fh:
+            response = requests.post(
+                url,
+                files={"file": fh},
+                data={"upload_preset": CLOUDINARY_UPLOAD_PRESET},
+                timeout=600,
+            )
+        response.raise_for_status()
+        return response.json()["secure_url"]
+
+    return run_with_retries(attempt)
 
 
 def publish_to_instagram(video_url):
     create_url = f"https://graph.instagram.com/v21.0/{IG_ACCOUNT_ID}/media"
-    resp = requests.post(create_url, data={
-        "media_type": "REELS",
-        "video_url": video_url,
-        "caption": CAPTION,
-        "access_token": IG_ACCESS_TOKEN,
-    })
-    resp.raise_for_status()
-    creation_id = resp.json()["id"]
+
+    def create_container():
+        resp = requests.post(create_url, data={
+            "media_type": "REELS",
+            "video_url": video_url,
+            "caption": CAPTION,
+            "access_token": IG_ACCESS_TOKEN,
+        }, timeout=60)
+        resp.raise_for_status()
+        return resp.json()["id"]
+
+    creation_id = run_with_retries(create_container)
 
     status_url = f"https://graph.instagram.com/v21.0/{creation_id}"
-    for _ in range(60):
-        time.sleep(10)
+
+    def check_status():
         status_resp = requests.get(status_url, params={
             "fields": "status_code",
             "access_token": IG_ACCESS_TOKEN,
-        })
+        }, timeout=60)
         status_resp.raise_for_status()
-        status_code = status_resp.json().get("status_code")
+        return status_resp.json().get("status_code")
+
+    for _ in range(60):
+        time.sleep(10)
+        status_code = run_with_retries(check_status, attempts=2)
         if status_code == "FINISHED":
             break
         if status_code == "ERROR":
@@ -187,12 +219,16 @@ def publish_to_instagram(video_url):
         raise RuntimeError("Timed out waiting for Instagram to process the video")
 
     publish_url = f"https://graph.instagram.com/v21.0/{IG_ACCOUNT_ID}/media_publish"
-    publish_resp = requests.post(publish_url, data={
-        "creation_id": creation_id,
-        "access_token": IG_ACCESS_TOKEN,
-    })
-    publish_resp.raise_for_status()
-    return publish_resp.json()
+
+    def publish():
+        publish_resp = requests.post(publish_url, data={
+            "creation_id": creation_id,
+            "access_token": IG_ACCESS_TOKEN,
+        }, timeout=60)
+        publish_resp.raise_for_status()
+        return publish_resp.json()
+
+    return run_with_retries(publish)
 
 
 def main():
