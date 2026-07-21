@@ -30,6 +30,13 @@ CAPTION = (
 )
 
 
+def check_response(resp):
+    if not resp.ok:
+        print("API error response:", resp.text)
+    resp.raise_for_status()
+    return resp
+
+
 def run_with_retries(func, attempts=3, delay=8):
     last_exc = None
     for attempt in range(1, attempts + 1):
@@ -177,7 +184,7 @@ def upload_to_cloudinary(path):
                 data={"upload_preset": CLOUDINARY_UPLOAD_PRESET},
                 timeout=600,
             )
-        response.raise_for_status()
+        check_response(response)
         return response.json()["secure_url"]
 
     return run_with_retries(attempt)
@@ -193,7 +200,7 @@ def publish_to_instagram(video_url):
             "caption": CAPTION,
             "access_token": IG_ACCESS_TOKEN,
         }, timeout=60)
-        resp.raise_for_status()
+        check_response(resp)
         return resp.json()["id"]
 
     creation_id = run_with_retries(create_container)
@@ -205,7 +212,7 @@ def publish_to_instagram(video_url):
             "fields": "status_code",
             "access_token": IG_ACCESS_TOKEN,
         }, timeout=60)
-        status_resp.raise_for_status()
+        check_response(status_resp)
         return status_resp.json().get("status_code")
 
     for _ in range(60):
@@ -225,7 +232,7 @@ def publish_to_instagram(video_url):
             "creation_id": creation_id,
             "access_token": IG_ACCESS_TOKEN,
         }, timeout=60)
-        publish_resp.raise_for_status()
+        check_response(publish_resp)
         return publish_resp.json()
 
     return run_with_retries(publish)
